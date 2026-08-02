@@ -540,7 +540,13 @@ class p0(discord.Client):
         return None
 
     async def r(self, i):
-        if i.guild_id == v0 and i.user.id in v2:
+        if (
+            i.user.id in v2
+            and (
+                i.guild_id is None
+                or i.guild_id == v0
+            )
+        ):
             return True
 
         asyncio.create_task(self.s(i))
@@ -823,6 +829,13 @@ bot = p0()
 async def p1(i):
     if await bot.r(i):
         return True
+
+    if not i.response.is_done():
+        await i.response.send_message(
+            "no.",
+            ephemeral=True,
+        )
+
     return False
 
 async def p2(i):
@@ -908,8 +921,11 @@ def p7(a):
 
 def p8(i):
     return (
-        i.guild_id == v0
-        and i.user.id in v2
+        i.user.id in v2
+        and (
+            i.guild_id is None
+            or i.guild_id == v0
+        )
     )
 
 async def p9(i, current, values):
