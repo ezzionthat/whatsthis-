@@ -1,182 +1,304 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import os
 import re
 import time
 import traceback
+from collections import OrderedDict
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
 import aiohttp
 import discord
+from aiohttp import web
 from discord import app_commands
 from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
-from aiohttp import web
 
-v0 = 1533574360085037278
+AUTHORIZED_GUILD_ID = 1533574360085037278
 
-v1 = {
+LOG_CHANNEL_IDS = {
     "gamepasses": 1533574360529375466,
     "exclusive": 1533574657985347704,
     "powers": 1533574669775540335,
     "corrupt": 1533574681553272872,
-    "requests": 1533575613418307827,
-    "failed": 1533585424927297706,
+    "applications": 1533575613418307827,
+    "denied": 1533585424927297706,
 }
 
-v2 = {
-    1187698029973733388,
-    1248180512665767978,
-    1266390756973609042,
-}
+AUTHORIZED_DISCORD_USER_IDS = frozenset(
+    {
+        1187698029973733388,
+        1248180512665767978,
+        1266390756973609042,
+    }
+)
 
-v3 = [
-    "[Batarang]",
-    "[DooM]",
-    "[Genjutsu]",
-    "[Grimiore]",
-    "[Light Magic]",
-    "[Mjolnir]",
-    "[River]",
-    "AdminBat",
-    "BatmanOutfit",
-    "Cards",
-    "Cat Speed",
-    "CatwomanWhip",
-    "Dash Punch",
-    "Energy Hammer",
-    "EnergyBeam",
-    "Escape",
-    "FirePower",
-    "FlashTransformation",
-    "Flight",
-    "Fly",
-    "Ghost",
-    "Ghost Ray",
-    "Glide",
-    "GoblinGlider",
-    "GoblinGrenade",
-    "GrappleHook",
-    "GreenGoblinOutfit",
-    "GreenLanternOutfit",
-    "InvincibleOutfit",
-    "Joker Speed",
-    "JokerCard",
-    "JokerOutfit",
-    "Killer Queen",
-    "ReverseFlashOutfit",
-    "Soft & Wet",
-    "SpeedForce",
-    "Spiderman",
-    "Star Platinum",
-    "SuperPunch",
-    "TA4",
-    "The World",
-    "Tusk Act 4",
-    "Wonder of U",
-]
+POWER_PACKAGES = OrderedDict(
+    [
+        ("Batman", ("[Batarang]", "BatmanOutfit", "GrappleHook", "Glide")),
+        ("[DooM]", ("[DooM]",)),
+        ("[Genjutsu]", ("[Genjutsu]",)),
+        ("[Grimiore]", ("[Grimiore]",)),
+        ("[Light Magic]", ("[Light Magic]",)),
+        ("[Mjolnir]", ("[Mjolnir]",)),
+        ("[River]", ("[River]",)),
+        ("AdminBat", ("AdminBat",)),
+        ("Cards", ("Cards",)),
+        ("Catwoman", ("Cat Speed", "CatwomanWhip")),
+        ("Dash Punch", ("Dash Punch",)),
+        ("Escape", ("Escape",)),
+        ("FirePower", ("FirePower",)),
+        ("Flash", ("FlashTransformation", "SpeedForce")),
+        ("Ghost", ("Ghost", "Ghost Ray")),
+        (
+            "Green Goblin",
+            ("GoblinGlider", "GoblinGrenade", "GreenGoblinOutfit"),
+        ),
+        (
+            "Green Lantern",
+            ("Energy Hammer", "EnergyBeam", "Flight", "GreenLanternOutfit"),
+        ),
+        ("Invincible", ("InvincibleOutfit", "Fly", "SuperPunch")),
+        ("Joker", ("Joker Speed", "JokerCard", "JokerOutfit")),
+        ("Killer Queen", ("Killer Queen",)),
+        ("Reverse Flash", ("ReverseFlashOutfit",)),
+        ("Soft & Wet", ("Soft & Wet",)),
+        ("Spiderman", ("Spiderman",)),
+        ("Star Platinum", ("Star Platinum",)),
+        ("Tusk Act 4", ("TA4", "Tusk Act 4")),
+        ("The World", ("The World",)),
+        ("Wonder of U", ("Wonder of U",)),
+    ]
+)
 
-v4 = {
-    "PSPlus": "PS Plus",
-    "Spit": "Spit",
-    "SMG": "SMG",
-    "Mask": "Mask",
-    "Food": "Food",
-    "Char": "Char",
-    "Armor": "Armor",
-    "MaxArmor": "Max Armor",
-    "Aimviewer": "Aimviewer",
-    "2xWanted": "2x Wanted",
-    "AnonymousMode": "Anonymous Mode",
-    "RingTone": "Ring Tone",
-}
+GAMEPASS_NAMES = OrderedDict(
+    [
+        ("PSPlus", "PS Plus"),
+        ("Spit", "Spit"),
+        ("SMG", "SMG"),
+        ("Mask", "Mask"),
+        ("Food", "Food"),
+        ("Char", "Char"),
+        ("Armor", "Armor"),
+        ("MaxArmor", "Max Armor"),
+        ("Aimviewer", "Aimviewer"),
+        ("2xWanted", "2x Wanted"),
+        ("AnonymousMode", "Anonymous Mode"),
+        ("RingTone", "Ring Tone"),
+    ]
+)
 
-v5 = os.environ.get("DISCORD_TOKEN", "").strip()
-v6 = os.environ.get("MODERATION_API_SECRET", "").strip()
-v7 = os.environ.get(
+
+def required_environment(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(f"missing {name}")
+    return value
+
+
+DISCORD_TOKEN = required_environment("DISCORD_TOKEN")
+MODERATION_API_SECRET = required_environment("MODERATION_API_SECRET")
+DISCORD_PUBLIC_KEY = required_environment("DISCORD_PUBLIC_KEY")
+BACKEND_URL = os.environ.get(
     "BACKEND_URL",
     "https://209-54-105-140.sslip.io",
 ).strip().rstrip("/")
-v8 = os.environ.get("DISCORD_PUBLIC_KEY", "").strip()
-v9 = int(os.environ.get("PORT", "8080"))
+RAILWAY_PORT = int(os.environ.get("PORT", "8080"))
 
-if not v5:
-    raise RuntimeError("missing DISCORD_TOKEN")
+try:
+    DISCORD_SIGNATURE_VERIFIER = VerifyKey(bytes.fromhex(DISCORD_PUBLIC_KEY))
+except (ValueError, TypeError) as verification_error:
+    raise RuntimeError("invalid DISCORD_PUBLIC_KEY") from verification_error
 
-if not v6:
-    raise RuntimeError("missing MODERATION_API_SECRET")
 
-if not v8:
-    raise RuntimeError("missing DISCORD_PUBLIC_KEY")
-
-class u0(Exception):
-    def __init__(self, v):
-        self.code = str(v)
+class CheckmateFault(Exception):
+    def __init__(self, code: str):
+        self.code = str(code)
         super().__init__(self.code)
 
-def u1(v):
-    return re.sub(r"[^a-z0-9]+", "", str(v).lower())
 
-u2 = {u1(v): v for v in v3}
-u3 = {}
+def normalize_name(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value).lower())
 
-for k, v in v4.items():
-    u3[u1(k)] = k
-    u3[u1(v)] = k
 
-def u4(v):
-    if isinstance(v, str) and v.lower() == "yes":
+POWER_NAME_ALIASES: dict[str, str] = {}
+POWER_COMPONENT_TO_PACKAGE: dict[str, str] = {}
+ALL_POWER_COMPONENTS: tuple[str, ...] = tuple(
+    component
+    for package_components in POWER_PACKAGES.values()
+    for component in package_components
+)
+ALL_POWER_COMPONENT_SET = frozenset(ALL_POWER_COMPONENTS)
+
+for power_package_name, power_package_components in POWER_PACKAGES.items():
+    POWER_NAME_ALIASES[normalize_name(power_package_name)] = power_package_name
+    for power_component_name in power_package_components:
+        POWER_NAME_ALIASES[normalize_name(power_component_name)] = power_package_name
+        POWER_COMPONENT_TO_PACKAGE[power_component_name] = power_package_name
+
+GAMEPASS_NAME_ALIASES: dict[str, str] = {}
+for gamepass_storage_name, gamepass_display_name in GAMEPASS_NAMES.items():
+    GAMEPASS_NAME_ALIASES[normalize_name(gamepass_storage_name)] = gamepass_storage_name
+    GAMEPASS_NAME_ALIASES[normalize_name(gamepass_display_name)] = gamepass_storage_name
+
+
+def option_is_ephemeral(value: str) -> bool:
+    return str(value).lower() == "yes"
+
+
+def parse_roblox_user_id(value: Any) -> int:
+    normalized_value = str(value).strip()
+    if not normalized_value.isdigit():
+        raise CheckmateFault("3003")
+    user_id = int(normalized_value)
+    if user_id <= 0 or user_id > 9_007_199_254_740_991:
+        raise CheckmateFault("3003")
+    return user_id
+
+
+def resolve_power_package(value: Any) -> str:
+    package_name = POWER_NAME_ALIASES.get(normalize_name(value))
+    if not package_name:
+        raise CheckmateFault("3001")
+    return package_name
+
+
+def resolve_gamepass_name(value: Any) -> str:
+    storage_name = GAMEPASS_NAME_ALIASES.get(normalize_name(value))
+    if not storage_name:
+        raise CheckmateFault("3002")
+    return storage_name
+
+
+def access_record_enabled(value: Any) -> bool:
+    if value is True:
         return True
-    return False
+    return isinstance(value, dict) and value.get("enabled") is True
 
-def u5(v):
-    x = str(v).strip()
 
-    if not x.isdigit():
-        raise u0("1005")
+def enabled_power_components(access_data: dict[str, Any]) -> set[str]:
+    power_records = access_data.get("powers")
+    if not isinstance(power_records, dict):
+        return set()
+    return {
+        str(power_name)
+        for power_name, power_record in power_records.items()
+        if access_record_enabled(power_record)
+    }
 
-    n = int(x)
 
-    if n <= 0 or n > 10000000000000:
-        raise u0("1005")
+def displayed_power_names(access_data: dict[str, Any]) -> list[str]:
+    owned_components = enabled_power_components(access_data)
+    displayed_names: list[str] = []
+    for package_name, package_components in POWER_PACKAGES.items():
+        if any(component in owned_components for component in package_components):
+            displayed_names.append(package_name)
+    displayed_names.extend(
+        sorted(
+            owned_components.difference(ALL_POWER_COMPONENT_SET),
+            key=str.lower,
+        )
+    )
+    return displayed_names
 
-    return n
 
-def u6(v):
-    k = u1(v)
-    x = u2.get(k)
+def package_names_for_components(components: set[str] | list[str]) -> list[str]:
+    component_set = set(components)
+    package_names: list[str] = []
+    for package_name, package_components in POWER_PACKAGES.items():
+        if any(component in component_set for component in package_components):
+            package_names.append(package_name)
+    package_names.extend(
+        sorted(
+            component_set.difference(ALL_POWER_COMPONENT_SET),
+            key=str.lower,
+        )
+    )
+    return package_names
 
-    if not x:
-        raise u0("1017")
 
-    return x
+def enabled_gamepass_sources(access_data: dict[str, Any]) -> dict[str, bool]:
+    source_names = (
+        "gamepasses",
+        "purchasedGamepasses",
+        "giftedGamepasses",
+    )
+    enabled_sources: dict[str, bool] = {}
+    for gamepass_storage_name in GAMEPASS_NAMES:
+        enabled_sources[gamepass_storage_name] = any(
+            isinstance(access_data.get(source_name), dict)
+            and access_record_enabled(
+                access_data[source_name].get(gamepass_storage_name)
+            )
+            for source_name in source_names
+        )
+    return enabled_sources
 
-def u7(v):
-    k = u1(v)
-    x = u3.get(k)
 
-    if not x:
-        raise u0("1018")
+def manually_enabled_gamepasses(access_data: dict[str, Any]) -> set[str]:
+    manual_records = access_data.get("gamepasses")
+    if not isinstance(manual_records, dict):
+        return set()
+    return {
+        gamepass_storage_name
+        for gamepass_storage_name in GAMEPASS_NAMES
+        if access_record_enabled(manual_records.get(gamepass_storage_name))
+    }
 
-    return x
 
-def u8(v):
-    return v4.get(v, v)
+def command_name(interaction: discord.Interaction) -> str:
+    if interaction.command:
+        return str(interaction.command.name)
+    return "unknown"
 
-def u9(v):
-    if not isinstance(v, dict):
-        return False
-    return v.get("enabled") is True
 
-class p0(discord.Client):
-    def __init__(self):
-        x = discord.Intents.none()
-        x.guilds = True
+def interaction_context(interaction: discord.Interaction) -> str:
+    if interaction.guild_id is None:
+        return "dm/private"
+    guild_name = interaction.guild.name if interaction.guild else "unknown"
+    return f"{guild_name} ({interaction.guild_id})"
 
-        super().__init__(intents=x)
 
-        self.tree = app_commands.CommandTree(
+def user_avatar_url(user: discord.abc.User) -> str | None:
+    try:
+        return user.display_avatar.url
+    except Exception:
+        return None
+
+
+def ranked_autocomplete_choices(
+    current: str,
+    values: list[str],
+) -> list[app_commands.Choice[str]]:
+    normalized_current = normalize_name(current)
+    ranked_values: list[tuple[int, str, str]] = []
+    for value in values:
+        normalized_value = normalize_name(value)
+        if not normalized_current:
+            score = 0
+        elif normalized_value.startswith(normalized_current):
+            score = 0
+        elif normalized_current in normalized_value:
+            score = 1
+        else:
+            continue
+        ranked_values.append((score, value.lower(), value))
+    ranked_values.sort()
+    return [
+        app_commands.Choice(name=value, value=value)
+        for _, _, value in ranked_values[:25]
+    ]
+
+
+class CheckmateClient(discord.Client):
+    def __init__(self) -> None:
+        discord_intents = discord.Intents.none()
+        discord_intents.guilds = True
+        super().__init__(intents=discord_intents)
+        self.command_tree = app_commands.CommandTree(
             self,
             allowed_contexts=app_commands.AppCommandContext(
                 guild=True,
@@ -188,1475 +310,1462 @@ class p0(discord.Client):
                 user=True,
             ),
         )
+        self.api_session: aiohttp.ClientSession | None = None
+        self.web_runner: web.AppRunner | None = None
+        self.roblox_user_cache: dict[int, tuple[float, dict[str, Any]]] = {}
+        self.user_operation_locks: dict[int, asyncio.Lock] = {}
+        self.known_roblox_user_ids: set[int] = set()
+        self.webhook_event_cache: OrderedDict[str, float] = OrderedDict()
 
-        self.a = None
-        self.b = None
-        self.c = {}
-        self.d = {}
-        self.e = set()
-
-    async def setup_hook(self):
-        self.a = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=12)
+    async def setup_hook(self) -> None:
+        self.api_session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=15),
+            connector=aiohttp.TCPConnector(limit=50),
         )
-
-        await self.f()
-
+        await self.start_web_server()
         try:
-            await self.tree.sync()
-        except Exception:
+            await self.command_tree.sync()
+        except Exception as synchronization_error:
             traceback.print_exc()
-            raise RuntimeError("1012")
+            raise RuntimeError("command sync failed") from synchronization_error
 
-    async def close(self):
-        if self.b:
-            await self.b.cleanup()
-
-        if self.a:
-            await self.a.close()
-
+    async def close(self) -> None:
+        if self.web_runner:
+            await self.web_runner.cleanup()
+        if self.api_session:
+            await self.api_session.close()
         await super().close()
 
-    async def on_ready(self):
-        for g in list(self.guilds):
-            if g.id != v0:
-                await self.h(
+    async def on_ready(self) -> None:
+        for connected_guild in list(self.guilds):
+            if connected_guild.id == AUTHORIZED_GUILD_ID:
+                continue
+            try:
+                await self.log_application_event(
                     {
                         "integration_type": 0,
                         "user": {
-                            "id": str(g.owner_id or 0),
-                            "username": str(g.owner or "unknown"),
-                            "global_name": str(g.owner or "unknown"),
+                            "id": str(connected_guild.owner_id or 0),
+                            "username": str(connected_guild.owner or "unknown"),
+                            "global_name": str(connected_guild.owner or "unknown"),
                             "avatar": None,
-                            "discriminator": "0",
                         },
                         "scopes": ["bot", "applications.commands"],
                         "guild": {
-                            "id": str(g.id),
-                            "name": g.name,
+                            "id": str(connected_guild.id),
+                            "name": connected_guild.name,
                         },
                     },
-                    "unauthorized guild joined",
+                    "unauthorized server install",
+                    None,
                 )
-
-                try:
-                    await g.leave()
-                except Exception:
-                    traceback.print_exc()
-
+            except Exception:
+                traceback.print_exc()
+            try:
+                await connected_guild.leave()
+            except Exception:
+                traceback.print_exc()
         print(
-            f"connected as {self.user} | guilds={len(self.guilds)}"
+            f"connected as {self.user} | guilds={len(self.guilds)} | "
+            f"commands={len(self.command_tree.get_commands())}"
         )
 
-    async def on_guild_join(self, g):
-        if g.id == v0:
+    async def on_guild_join(self, guild: discord.Guild) -> None:
+        if guild.id == AUTHORIZED_GUILD_ID:
             return
-
-        await self.h(
-            {
-                "integration_type": 0,
-                "user": {
-                    "id": str(g.owner_id or 0),
-                    "username": str(g.owner or "unknown"),
-                    "global_name": str(g.owner or "unknown"),
-                    "avatar": None,
-                    "discriminator": "0",
-                },
-                "scopes": ["bot", "applications.commands"],
-                "guild": {
-                    "id": str(g.id),
-                    "name": g.name,
-                },
-            },
-            "unauthorized guild joined",
-        )
-
         try:
-            await g.leave()
+            await self.log_application_event(
+                {
+                    "integration_type": 0,
+                    "user": {
+                        "id": str(guild.owner_id or 0),
+                        "username": str(guild.owner or "unknown"),
+                        "global_name": str(guild.owner or "unknown"),
+                        "avatar": None,
+                    },
+                    "scopes": ["bot", "applications.commands"],
+                    "guild": {
+                        "id": str(guild.id),
+                        "name": guild.name,
+                    },
+                },
+                "unauthorized server install",
+                None,
+            )
+        except Exception:
+            traceback.print_exc()
+        try:
+            await guild.leave()
         except Exception:
             traceback.print_exc()
 
-    async def f(self):
-        x = web.Application()
-        x.router.add_get("/health", self.i)
-        x.router.add_post("/discord-events", self.j)
-
-        self.b = web.AppRunner(x)
-        await self.b.setup()
-
-        y = web.TCPSite(
-            self.b,
-            "0.0.0.0",
-            v9,
+    async def start_web_server(self) -> None:
+        web_application = web.Application(client_max_size=1_048_576)
+        web_application.router.add_get("/health", self.health_endpoint)
+        web_application.router.add_post(
+            "/discord-events",
+            self.discord_events_endpoint,
         )
+        self.web_runner = web.AppRunner(web_application)
+        await self.web_runner.setup()
+        web_site = web.TCPSite(
+            self.web_runner,
+            "0.0.0.0",
+            RAILWAY_PORT,
+        )
+        await web_site.start()
 
-        await y.start()
-
-    async def i(self, _):
+    async def health_endpoint(self, _: web.Request) -> web.Response:
         return web.json_response(
             {
                 "ok": True,
                 "ready": self.is_ready(),
+                "guilds": len(self.guilds),
             }
         )
 
-    async def j(self, r):
-        s = r.headers.get("X-Signature-Ed25519", "")
-        t = r.headers.get("X-Signature-Timestamp", "")
-        b = await r.read()
-
+    async def discord_events_endpoint(
+        self,
+        request: web.Request,
+    ) -> web.Response:
+        request_signature = request.headers.get("X-Signature-Ed25519", "")
+        request_timestamp = request.headers.get("X-Signature-Timestamp", "")
+        request_body = await request.read()
         try:
-            VerifyKey(bytes.fromhex(v8)).verify(
-                t.encode() + b,
-                bytes.fromhex(s),
+            DISCORD_SIGNATURE_VERIFIER.verify(
+                request_timestamp.encode("utf-8") + request_body,
+                bytes.fromhex(request_signature),
             )
         except (ValueError, BadSignatureError):
             return web.Response(status=401)
-
         try:
-            x = json.loads(b.decode("utf-8"))
-        except Exception:
+            webhook_payload = json.loads(request_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
             return web.Response(status=400)
-
-        if x.get("type") == 0:
-            return web.Response(status=204)
-
-        e = x.get("event") or {}
-        n = e.get("type")
-        d = e.get("data") or {}
-
-        if n == "APPLICATION_AUTHORIZED":
-            asyncio.create_task(
-                self.h(
-                    d,
-                    "application authorized",
-                )
+        if webhook_payload.get("type") == 0:
+            return web.Response(
+                status=204,
+                headers={"Content-Type": "application/json"},
             )
-
-        if n == "APPLICATION_DEAUTHORIZED":
+        if webhook_payload.get("type") == 1:
             asyncio.create_task(
-                self.h(
-                    d,
-                    "application deauthorized",
-                )
+                self.process_discord_webhook_event(webhook_payload)
             )
-
         return web.Response(status=204)
 
-    async def k(self, n):
-        x = self.get_channel(n)
+    async def process_discord_webhook_event(
+        self,
+        webhook_payload: dict[str, Any],
+    ) -> None:
+        event_body = webhook_payload.get("event")
+        if not isinstance(event_body, dict):
+            return
+        event_type = str(event_body.get("type") or "")
+        event_timestamp = str(event_body.get("timestamp") or "")
+        event_data = event_body.get("data")
+        if not isinstance(event_data, dict):
+            event_data = {}
+        event_user = event_data.get("user")
+        event_user_id = (
+            str(event_user.get("id") or "unknown")
+            if isinstance(event_user, dict)
+            else "unknown"
+        )
+        event_guild = event_data.get("guild")
+        event_guild_id = (
+            str(event_guild.get("id") or "none")
+            if isinstance(event_guild, dict)
+            else "none"
+        )
+        event_key = (
+            f"{event_type}|{event_timestamp}|{event_user_id}|{event_guild_id}"
+        )
+        current_time = time.monotonic()
+        while self.webhook_event_cache:
+            oldest_key, oldest_time = next(iter(self.webhook_event_cache.items()))
+            if current_time - oldest_time <= 600:
+                break
+            self.webhook_event_cache.pop(oldest_key, None)
+        if event_key in self.webhook_event_cache:
+            return
+        self.webhook_event_cache[event_key] = current_time
+        try:
+            if event_type == "APPLICATION_AUTHORIZED":
+                await self.log_application_event(
+                    event_data,
+                    "application authorized",
+                    event_timestamp,
+                )
+            elif event_type == "APPLICATION_DEAUTHORIZED":
+                await self.log_application_event(
+                    event_data,
+                    "application deauthorized",
+                    event_timestamp,
+                )
+        except Exception:
+            traceback.print_exc()
 
-        if x is None:
+    def interaction_is_authorized(
+        self,
+        interaction: discord.Interaction,
+    ) -> bool:
+        if interaction.user.id not in AUTHORIZED_DISCORD_USER_IDS:
+            return False
+        if interaction.guild_id is None:
+            return True
+        return interaction.guild_id == AUTHORIZED_GUILD_ID
+
+    def operation_lock(self, roblox_user_id: int) -> asyncio.Lock:
+        operation_lock = self.user_operation_locks.get(roblox_user_id)
+        if operation_lock is None:
+            operation_lock = asyncio.Lock()
+            self.user_operation_locks[roblox_user_id] = operation_lock
+        return operation_lock
+
+    async def fetch_log_channel(
+        self,
+        channel_category: str,
+    ) -> discord.abc.Messageable:
+        channel_id = LOG_CHANNEL_IDS[channel_category]
+        log_channel = self.get_channel(channel_id)
+        if log_channel is None:
             try:
-                x = await self.fetch_channel(n)
-            except Exception as e:
-                raise u0("1010") from e
+                log_channel = await self.fetch_channel(channel_id)
+            except Exception as channel_error:
+                raise CheckmateFault("2101") from channel_error
+        if not hasattr(log_channel, "send"):
+            raise CheckmateFault("2101")
+        channel_guild = getattr(log_channel, "guild", None)
+        if channel_guild and channel_guild.id != AUTHORIZED_GUILD_ID:
+            raise CheckmateFault("2101")
+        return log_channel
 
-        if not hasattr(x, "send"):
-            raise u0("1010")
-
-        return x
-
-    async def l(self, n, e):
-        x = await self.k(n)
-        z = None
-
-        for q in range(3):
+    async def send_log_embed(
+        self,
+        channel_category: str,
+        log_embed: discord.Embed,
+    ) -> discord.Message:
+        log_channel = await self.fetch_log_channel(channel_category)
+        for send_attempt in range(3):
             try:
-                z = await x.send(
-                    embed=e,
+                return await log_channel.send(
+                    embed=log_embed,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
-                break
-            except Exception:
-                if q == 2:
-                    raise u0("1010")
-                await asyncio.sleep(q + 1)
+            except Exception as send_error:
+                if send_attempt == 2:
+                    raise CheckmateFault("2102") from send_error
+                await asyncio.sleep(send_attempt + 1)
+        raise CheckmateFault("2102")
 
-        return z
-
-    async def m(self, method, path, body=None):
-        if not self.a:
-            raise u0("1002")
-
-        try:
-            async with self.a.request(
-                method,
-                f"{v7}{path}",
-                headers={
-                    "x-moderation-secret": v6,
-                    "content-type": "application/json",
-                },
-                json=body,
-            ) as r:
-                text = await r.text()
-        except asyncio.TimeoutError as e:
-            raise u0("1002") from e
-        except aiohttp.ClientError as e:
-            raise u0("1002") from e
-
-        try:
-            data = json.loads(text)
-        except Exception as e:
-            raise u0("1004") from e
-
-        if r.status == 401:
-            raise u0("1003")
-
-        if r.status >= 400 or data.get("ok") is not True:
-            raise u0("1009")
-
-        return data
-
-    async def n(self, uid):
-        x = await self.m(
-            "GET",
-            f"/moderation/access/{uid}",
-        )
-
-        a = x.get("access")
-
-        if not isinstance(a, dict):
-            raise u0("1008")
-
-        return a
-
-    async def o(self, uid, kind, action, name, i):
-        body = {
-            "userId": uid,
-            "kind": kind,
-            "action": action,
-            "actor": {
-                "discordId": str(i.user.id),
-                "username": str(i.user),
-                "displayName": getattr(
-                    i.user,
-                    "display_name",
-                    str(i.user),
-                ),
-                "guildId": str(i.guild_id or 0),
-                "command": (
-                    i.command.name
-                    if i.command
-                    else "unknown"
-                ),
-            },
-            "reason": (
-                i.command.name
-                if i.command
-                else "unknown"
-            ),
-        }
-
-        if name is not None:
-            body["name"] = name
-
-        x = await self.m(
-            "POST",
-            "/moderation/access/change",
-            body,
-        )
-
-        if not x.get("requestId"):
-            raise u0("1009")
-
-        return x
-
-    async def p(self, uid):
-        now = time.monotonic()
-        old = self.c.get(uid)
-
-        if old and now - old[0] < 600:
-            return old[1]
-
-        if not self.a:
-            raise u0("1002")
-
-        try:
-            async with self.a.post(
-                "https://users.roblox.com/v1/users",
-                json={
-                    "userIds": [uid],
-                    "excludeBannedUsers": False,
-                },
-            ) as r:
-                x = await r.json(content_type=None)
-        except Exception as e:
-            raise u0("1006") from e
-
-        data = x.get("data") if isinstance(x, dict) else None
-
-        if not isinstance(data, list) or not data:
-            raise u0("1006")
-
-        y = data[0]
-        avatar = await self.q(uid)
-
-        z = {
-            "id": uid,
-            "name": str(y.get("name") or uid),
-            "display_name": str(
-                y.get("displayName")
-                or y.get("name")
-                or uid
-            ),
-            "avatar": avatar,
-        }
-
-        self.c[uid] = (now, z)
-
-        return z
-
-    async def q(self, uid):
-        if not self.a:
-            return None
-
-        for n in range(3):
+    def queue_denied_usage_log(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        async def denied_log_task() -> None:
             try:
-                async with self.a.get(
-                    "https://thumbnails.roblox.com/v1/users/avatar-headshot",
-                    params={
-                        "userIds": str(uid),
-                        "size": "150x150",
-                        "format": "Png",
-                        "isCircular": "false",
-                    },
-                ) as r:
-                    x = await r.json(content_type=None)
-
-                d = x.get("data") if isinstance(x, dict) else None
-
-                if isinstance(d, list) and d:
-                    image = d[0].get("imageUrl")
-                    state = d[0].get("state")
-
-                    if image and state == "Completed":
-                        return str(image)
+                await self.log_denied_usage(interaction)
             except Exception:
-                pass
+                traceback.print_exc()
 
-            await asyncio.sleep(0.5)
+        asyncio.create_task(denied_log_task())
 
-        return None
-
-    async def r(self, i):
-        if (
-            i.user.id in v2
-            and (
-                i.guild_id is None
-                or i.guild_id == v0
-            )
-        ):
-            return True
-
-        asyncio.create_task(self.s(i))
-        return False
-
-    async def s(self, i):
+    async def log_denied_usage(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
         await self.wait_until_ready()
-
-        x = discord.Embed(
+        denied_embed = discord.Embed(
             title="failed command usage",
             color=12735058,
             timestamp=datetime.now(timezone.utc),
         )
-
-        try:
-            x.set_author(
-                name=str(i.user),
-                icon_url=i.user.display_avatar.url,
+        denied_avatar = user_avatar_url(interaction.user)
+        if denied_avatar:
+            denied_embed.set_author(
+                name=str(interaction.user),
+                icon_url=denied_avatar,
             )
-        except Exception:
-            x.set_author(name=str(i.user))
-
-        x.add_field(
+        else:
+            denied_embed.set_author(name=str(interaction.user))
+        denied_embed.add_field(
             name="user",
-            value=f"{i.user} ({i.user.id})",
+            value=f"{interaction.user} ({interaction.user.id})",
             inline=False,
         )
-        x.add_field(
+        denied_embed.add_field(
             name="command",
-            value=(
-                f"/{i.command.name}"
-                if i.command
-                else "unknown"
-            ),
+            value=f"/{command_name(interaction)}",
             inline=True,
         )
-        x.add_field(
+        denied_embed.add_field(
             name="server",
-            value=str(i.guild_id or "dm"),
+            value=str(interaction.guild_id or "dm/private"),
             inline=True,
         )
-        x.add_field(
+        denied_embed.add_field(
             name="channel",
-            value=str(i.channel_id or "unknown"),
+            value=str(interaction.channel_id or "unknown"),
             inline=True,
         )
-        x.add_field(
+        denied_embed.add_field(
             name="date/time",
             value=f"<t:{int(time.time())}:F>",
             inline=False,
         )
+        await self.send_log_embed("denied", denied_embed)
 
-        try:
-            await self.l(v1["failed"], x)
-        except Exception:
-            traceback.print_exc()
-
-    async def h(self, d, action):
+    async def log_application_event(
+        self,
+        event_data: dict[str, Any],
+        event_action: str,
+        event_timestamp: str | None,
+    ) -> None:
         await self.wait_until_ready()
-
-        user = d.get("user") or {}
-        guild = d.get("guild") or {}
-        uid = str(user.get("id") or "unknown")
-        username = str(
-            user.get("global_name")
-            or user.get("username")
+        event_user = event_data.get("user")
+        if not isinstance(event_user, dict):
+            event_user = {}
+        event_guild = event_data.get("guild")
+        if not isinstance(event_guild, dict):
+            event_guild = {}
+        event_user_id = str(event_user.get("id") or "unknown")
+        event_username = str(
+            event_user.get("global_name")
+            or event_user.get("username")
             or "unknown"
         )
-        avatar = user.get("avatar")
-        icon = None
-
-        if avatar and uid.isdigit():
-            icon = (
-                f"https://cdn.discordapp.com/avatars/"
-                f"{uid}/{avatar}.png?size=128"
+        event_avatar_hash = event_user.get("avatar")
+        event_avatar_url = None
+        if event_avatar_hash and event_user_id.isdigit():
+            event_avatar_url = (
+                f"https://cdn.discordapp.com/avatars/{event_user_id}/"
+                f"{event_avatar_hash}.png?size=128"
             )
-
-        x = discord.Embed(
-            title=action,
+        application_embed = discord.Embed(
+            title=event_action,
             color=15320064,
             timestamp=datetime.now(timezone.utc),
         )
-
-        if icon:
-            x.set_author(
-                name=username,
-                icon_url=icon,
+        if event_avatar_url:
+            application_embed.set_author(
+                name=event_username,
+                icon_url=event_avatar_url,
             )
         else:
-            x.set_author(name=username)
-
-        t = d.get("integration_type")
-        kind = (
+            application_embed.set_author(name=event_username)
+        integration_type = event_data.get("integration_type")
+        installation_type = (
             "user install"
-            if t == 1
+            if integration_type == 1
             else "server install"
-            if t == 0
+            if integration_type == 0
             else "unknown"
         )
-
-        x.add_field(
+        application_embed.add_field(
             name="user",
-            value=f"{username} ({uid})",
+            value=f"{event_username} ({event_user_id})",
             inline=False,
         )
-        x.add_field(
+        application_embed.add_field(
             name="type",
-            value=kind,
+            value=installation_type,
             inline=True,
         )
-        x.add_field(
+        application_embed.add_field(
             name="scopes",
             value=", ".join(
-                str(q)
-                for q in d.get("scopes", [])
-            ) or "n/a",
+                str(scope_name)
+                for scope_name in event_data.get("scopes", [])
+            )
+            or "n/a",
             inline=True,
         )
-        x.add_field(
+        application_embed.add_field(
             name="server",
             value=(
-                f"{guild.get('name', 'n/a')} "
-                f"({guild.get('id', 'n/a')})"
+                f"{event_guild.get('name', 'n/a')} "
+                f"({event_guild.get('id', 'n/a')})"
             ),
             inline=False,
         )
-        x.add_field(
-            name="date/time",
+        application_embed.add_field(
+            name="event time",
+            value=event_timestamp or "n/a",
+            inline=False,
+        )
+        application_embed.add_field(
+            name="logged at",
             value=f"<t:{int(time.time())}:F>",
             inline=False,
         )
+        await self.send_log_embed("applications", application_embed)
 
-        try:
-            await self.l(v1["requests"], x)
-        except Exception:
-            traceback.print_exc()
-
-    async def t(
+    async def log_access_change(
         self,
-        channel,
-        category,
-        action,
-        i,
-        roblox,
-        items,
-        requests,
-    ):
-        now = int(time.time())
-        item_text = "\n".join(
-            f"- {x}"
-            for x in items
-        ) or "n/a"
-
-        x = discord.Embed(
-            title=f"{category} {action}",
+        channel_category: str,
+        access_category: str,
+        access_action: str,
+        interaction: discord.Interaction,
+        roblox_user: dict[str, Any],
+        displayed_items: list[str],
+        request_ids: list[str],
+    ) -> None:
+        action_preposition = (
+            "to" if access_action in {"added", "granted"} else "from"
+        )
+        item_description = ", ".join(displayed_items)
+        change_embed = discord.Embed(
+            title=f"{access_category} {access_action}",
             description=(
-                f"{action} **{', '.join(items)}** "
-                f"{'to' if action in {'added', 'granted'} else 'from'} "
-                f"**{roblox['name']}**"
+                f"{access_action} **{item_description}** {action_preposition} "
+                f"**{roblox_user['name']}**"
             ),
             color=(
                 1353760
-                if action in {"added", "granted"}
+                if access_action in {"added", "granted"}
                 else 15787236
             ),
             timestamp=datetime.now(timezone.utc),
         )
-
-        if roblox.get("avatar"):
-            x.set_author(
-                name=roblox["name"],
-                icon_url=roblox["avatar"],
+        if roblox_user.get("avatar"):
+            change_embed.set_author(
+                name=roblox_user["name"],
+                icon_url=roblox_user["avatar"],
             )
         else:
-            x.set_author(name=roblox["name"])
-
-        x.add_field(
+            change_embed.set_author(name=roblox_user["name"])
+        change_embed.add_field(
             name="by",
-            value=f"{i.user} ({i.user.id})",
+            value=f"{interaction.user} ({interaction.user.id})",
             inline=False,
         )
-        x.add_field(
+        change_embed.add_field(
             name="roblox user",
-            value=(
-                f"{roblox['name']} "
-                f"({roblox['id']})"
-            ),
+            value=f"{roblox_user['name']} ({roblox_user['id']})",
             inline=False,
         )
-        x.add_field(
-            name=category,
-            value=item_text[:1024],
+        change_embed.add_field(
+            name=access_category,
+            value="\n".join(f"- {item}" for item in displayed_items)[:1024],
             inline=False,
         )
-        x.add_field(
+        change_embed.add_field(
             name="command",
-            value=(
-                f"/{i.command.name}"
-                if i.command
-                else "unknown"
-            ),
+            value=f"/{command_name(interaction)}",
             inline=True,
         )
-        x.add_field(
+        change_embed.add_field(
+            name="context",
+            value=interaction_context(interaction),
+            inline=True,
+        )
+        change_embed.add_field(
             name="date/time",
-            value=f"<t:{now}:F>",
-            inline=True,
-        )
-        x.add_field(
-            name="request",
-            value=(
-                ", ".join(requests)[:1024]
-                if requests
-                else "n/a"
-            ),
+            value=f"<t:{int(time.time())}:F>",
             inline=False,
         )
+        change_embed.add_field(
+            name="request",
+            value=", ".join(request_ids)[:1024] or "n/a",
+            inline=False,
+        )
+        change_embed.set_footer(
+            text=f"checkmateee|user|{roblox_user['id']}"
+        )
+        await self.send_log_embed(channel_category, change_embed)
 
-        if category == "gamepass":
-            x.set_footer(
-                text=f"checkmateee|gp|{roblox['id']}"
-            )
-
-        await self.l(channel, x)
-
-    def v(self, uid):
-        if uid not in self.d:
-            self.d[uid] = asyncio.Lock()
-        return self.d[uid]
-
-    async def w(self):
-        x = await self.k(v1["gamepasses"])
-        ids = set()
-
-        try:
-            async for m in x.history(limit=None):
-                if not m.embeds:
-                    continue
-
-                f = m.embeds[0].footer.text or ""
-
-                if not f.startswith("checkmateee|gp|"):
-                    continue
-
-                raw = f.rsplit("|", 1)[-1]
-
-                if raw.isdigit():
-                    ids.add(int(raw))
-        except Exception as e:
-            raise u0("1010") from e
-
-        counts = {
-            k: 0
-            for k in v4
+    async def backend_request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if not self.api_session:
+            raise CheckmateFault("2001")
+        request_headers = {
+            "x-moderation-secret": MODERATION_API_SECRET,
+            "accept": "application/json",
         }
+        request_arguments: dict[str, Any] = {"headers": request_headers}
+        if payload is not None:
+            request_headers["content-type"] = "application/json"
+            request_arguments["json"] = payload
+        final_status = 0
+        final_text = ""
+        maximum_attempts = 3 if method.upper() == "GET" else 1
+        for request_attempt in range(maximum_attempts):
+            try:
+                async with self.api_session.request(
+                    method,
+                    f"{BACKEND_URL}{path}",
+                    **request_arguments,
+                ) as backend_response:
+                    final_status = backend_response.status
+                    final_text = await backend_response.text()
+            except (aiohttp.ClientError, asyncio.TimeoutError) as request_error:
+                if request_attempt == maximum_attempts - 1:
+                    raise CheckmateFault("2001") from request_error
+                await asyncio.sleep(request_attempt + 1)
+                continue
+            if final_status >= 500 and request_attempt < maximum_attempts - 1:
+                await asyncio.sleep(request_attempt + 1)
+                continue
+            break
+        if final_status in {401, 403}:
+            raise CheckmateFault("2002")
+        if final_status >= 500:
+            raise CheckmateFault("2001")
+        try:
+            backend_data = json.loads(final_text)
+        except json.JSONDecodeError as response_error:
+            raise CheckmateFault("2003") from response_error
+        if not isinstance(backend_data, dict):
+            raise CheckmateFault("2003")
+        if final_status >= 400 or backend_data.get("ok") is not True:
+            raise CheckmateFault("2004")
+        return backend_data
 
-        sem = asyncio.Semaphore(8)
+    async def get_access(self, roblox_user_id: int) -> dict[str, Any]:
+        self.known_roblox_user_ids.add(roblox_user_id)
+        backend_data = await self.backend_request(
+            "GET",
+            f"/moderation/access/{roblox_user_id}",
+        )
+        access_data = backend_data.get("access")
+        if not isinstance(access_data, dict):
+            raise CheckmateFault("2005")
+        return access_data
 
-        async def one(uid):
-            async with sem:
+    async def change_access(
+        self,
+        roblox_user_id: int,
+        access_kind: str,
+        access_action: str,
+        access_name: str,
+        interaction: discord.Interaction,
+    ) -> str:
+        interaction_user = interaction.user
+        interaction_guild_id = str(interaction.guild_id or 0)
+        discord_user_id = str(interaction_user.id)
+        discord_username = str(interaction_user)
+        change_payload = {
+            "userId": roblox_user_id,
+            "kind": access_kind,
+            "action": access_action,
+            "name": access_name,
+            "actor": {
+                "discordId": discord_user_id,
+                "discordUserId": discord_user_id,
+                "username": discord_username,
+                "discordUsername": discord_username,
+                "displayName": getattr(
+                    interaction_user,
+                    "display_name",
+                    discord_username,
+                ),
+                "guildId": interaction_guild_id,
+                "discordGuildId": interaction_guild_id,
+                "command": command_name(interaction),
+            },
+            "reason": f"discord command /{command_name(interaction)}",
+        }
+        backend_data = await self.backend_request(
+            "POST",
+            "/moderation/access/change",
+            change_payload,
+        )
+        request_id = backend_data.get("requestId")
+        if not request_id:
+            raise CheckmateFault("2006")
+        return str(request_id)
+
+    async def lookup_roblox_user(
+        self,
+        roblox_user_id: int,
+    ) -> dict[str, Any]:
+        self.known_roblox_user_ids.add(roblox_user_id)
+        current_time = time.monotonic()
+        cached_user = self.roblox_user_cache.get(roblox_user_id)
+        if cached_user and current_time - cached_user[0] < 600:
+            return cached_user[1]
+        if not self.api_session:
+            raise CheckmateFault("2202")
+        roblox_data: dict[str, Any] | None = None
+        for request_attempt in range(3):
+            try:
+                async with self.api_session.post(
+                    "https://users.roblox.com/v1/users",
+                    json={
+                        "userIds": [roblox_user_id],
+                        "excludeBannedUsers": False,
+                    },
+                ) as roblox_response:
+                    if roblox_response.status != 200:
+                        raise aiohttp.ClientResponseError(
+                            roblox_response.request_info,
+                            roblox_response.history,
+                            status=roblox_response.status,
+                        )
+                    roblox_data = await roblox_response.json(content_type=None)
+                break
+            except (
+                aiohttp.ClientError,
+                asyncio.TimeoutError,
+                json.JSONDecodeError,
+            ) as roblox_error:
+                if request_attempt == 2:
+                    raise CheckmateFault("2202") from roblox_error
+                await asyncio.sleep(request_attempt + 1)
+        returned_users = (
+            roblox_data.get("data")
+            if isinstance(roblox_data, dict)
+            else None
+        )
+        if not isinstance(returned_users, list) or not returned_users:
+            raise CheckmateFault("2201")
+        returned_user = returned_users[0]
+        if not isinstance(returned_user, dict):
+            raise CheckmateFault("2201")
+        roblox_username = str(returned_user.get("name") or "").strip()
+        if not roblox_username:
+            raise CheckmateFault("2201")
+        avatar_url = await self.lookup_roblox_avatar(roblox_user_id)
+        normalized_user = {
+            "id": roblox_user_id,
+            "name": roblox_username,
+            "display_name": str(
+                returned_user.get("displayName") or roblox_username
+            ),
+            "avatar": avatar_url,
+        }
+        self.roblox_user_cache[roblox_user_id] = (
+            current_time,
+            normalized_user,
+        )
+        return normalized_user
+
+    async def lookup_roblox_avatar(
+        self,
+        roblox_user_id: int,
+    ) -> str | None:
+        if not self.api_session:
+            return None
+        for request_attempt in range(3):
+            try:
+                async with self.api_session.get(
+                    "https://thumbnails.roblox.com/v1/users/avatar-headshot",
+                    params={
+                        "userIds": str(roblox_user_id),
+                        "size": "150x150",
+                        "format": "Png",
+                        "isCircular": "false",
+                    },
+                ) as avatar_response:
+                    avatar_data = await avatar_response.json(content_type=None)
+                avatar_records = (
+                    avatar_data.get("data")
+                    if isinstance(avatar_data, dict)
+                    else None
+                )
+                if isinstance(avatar_records, list) and avatar_records:
+                    avatar_record = avatar_records[0]
+                    if (
+                        isinstance(avatar_record, dict)
+                        and avatar_record.get("state") == "Completed"
+                        and avatar_record.get("imageUrl")
+                    ):
+                        return str(avatar_record["imageUrl"])
+            except Exception:
+                pass
+            await asyncio.sleep(0.5 * (request_attempt + 1))
+        return None
+
+    async def rollback_access_changes(
+        self,
+        roblox_user_id: int,
+        access_kind: str,
+        original_action: str,
+        completed_names: list[str],
+        interaction: discord.Interaction,
+    ) -> None:
+        rollback_action = "remove" if original_action == "grant" else "grant"
+        rollback_failed = False
+        for completed_name in reversed(completed_names):
+            try:
+                await self.change_access(
+                    roblox_user_id,
+                    access_kind,
+                    rollback_action,
+                    completed_name,
+                    interaction,
+                )
+            except Exception:
+                rollback_failed = True
+                traceback.print_exc()
+        if rollback_failed:
+            raise CheckmateFault("2301")
+
+    async def perform_access_changes(
+        self,
+        roblox_user_id: int,
+        access_kind: str,
+        access_action: str,
+        access_names: list[str],
+        interaction: discord.Interaction,
+    ) -> tuple[list[str], list[str]]:
+        completed_names: list[str] = []
+        request_ids: list[str] = []
+        try:
+            for access_name in access_names:
+                request_id = await self.change_access(
+                    roblox_user_id,
+                    access_kind,
+                    access_action,
+                    access_name,
+                    interaction,
+                )
+                completed_names.append(access_name)
+                request_ids.append(request_id)
+        except Exception as change_error:
+            if completed_names:
                 try:
-                    a = await self.n(uid)
-                except Exception:
-                    return
+                    await self.rollback_access_changes(
+                        roblox_user_id,
+                        access_kind,
+                        access_action,
+                        completed_names,
+                        interaction,
+                    )
+                except CheckmateFault as rollback_error:
+                    raise rollback_error from change_error
+            raise
+        return completed_names, request_ids
 
-                gps = a.get("gamepasses") or {}
+    async def perform_logged_access_changes(
+        self,
+        roblox_user_id: int,
+        access_kind: str,
+        access_action: str,
+        access_names: list[str],
+        interaction: discord.Interaction,
+        log_channel_category: str,
+        log_access_category: str,
+        log_access_action: str,
+        roblox_user: dict[str, Any],
+        displayed_items: list[str],
+    ) -> list[str]:
+        completed_names, request_ids = await self.perform_access_changes(
+            roblox_user_id,
+            access_kind,
+            access_action,
+            access_names,
+            interaction,
+        )
+        try:
+            await self.log_access_change(
+                log_channel_category,
+                log_access_category,
+                log_access_action,
+                interaction,
+                roblox_user,
+                displayed_items,
+                request_ids,
+            )
+        except Exception as log_error:
+            try:
+                await self.rollback_access_changes(
+                    roblox_user_id,
+                    access_kind,
+                    access_action,
+                    completed_names,
+                    interaction,
+                )
+            except CheckmateFault as rollback_error:
+                raise rollback_error from log_error
+            raise
+        return request_ids
 
-                for name in counts:
-                    if u9(gps.get(name)):
-                        counts[name] += 1
+    async def collect_logged_roblox_user_ids(self) -> set[int]:
+        collected_user_ids = set(self.known_roblox_user_ids)
+        gamepass_log_channel = await self.fetch_log_channel("gamepasses")
+        try:
+            async for logged_message in gamepass_log_channel.history(limit=None):
+                for logged_embed in logged_message.embeds:
+                    footer_text = logged_embed.footer.text or ""
+                    footer_match = re.search(
+                        r"checkmateee(?:\|gp\||\|user\|)(\d+)",
+                        footer_text,
+                    )
+                    if footer_match:
+                        collected_user_ids.add(int(footer_match.group(1)))
+                    for embed_field in logged_embed.fields:
+                        if embed_field.name.lower() != "roblox user":
+                            continue
+                        field_match = re.search(r"\((\d+)\)", embed_field.value)
+                        if field_match:
+                            collected_user_ids.add(int(field_match.group(1)))
+        except Exception as history_error:
+            raise CheckmateFault("2103") from history_error
+        return collected_user_ids
+
+    async def count_gamepasses(self) -> dict[str, int]:
+        candidate_user_ids = await self.collect_logged_roblox_user_ids()
+        gamepass_counts = {
+            gamepass_storage_name: 0
+            for gamepass_storage_name in GAMEPASS_NAMES
+        }
+        access_semaphore = asyncio.Semaphore(6)
+
+        async def count_user_gamepasses(roblox_user_id: int) -> None:
+            async with access_semaphore:
+                access_data = await self.get_access(roblox_user_id)
+                effective_gamepasses = enabled_gamepass_sources(access_data)
+                for gamepass_storage_name, is_enabled in effective_gamepasses.items():
+                    if is_enabled:
+                        gamepass_counts[gamepass_storage_name] += 1
 
         await asyncio.gather(
-            *(one(uid) for uid in ids)
+            *(
+                count_user_gamepasses(roblox_user_id)
+                for roblox_user_id in candidate_user_ids
+            )
         )
+        return gamepass_counts
 
-        return counts
 
-bot = p0()
+checkmate_client = CheckmateClient()
+checkmate_tree = checkmate_client.command_tree
 
-async def p1(i):
-    if await bot.r(i):
+
+async def require_checkmate_access(
+    interaction: discord.Interaction,
+) -> bool:
+    if checkmate_client.interaction_is_authorized(interaction):
         return True
-
-    if not i.response.is_done():
-        await i.response.send_message(
-            "no.",
-            ephemeral=True,
-        )
-
+    checkmate_client.queue_denied_usage_log(interaction)
     return False
 
-async def p2(i):
-    if not i.response.is_done():
-        await i.response.defer(
-            ephemeral=True,
+
+async def defer_command_response(
+    interaction: discord.Interaction,
+    ephemeral: bool = False,
+) -> None:
+    interaction.extras["checkmate_response_ephemeral"] = ephemeral
+    if not interaction.response.is_done():
+        await interaction.response.defer(
+            ephemeral=ephemeral,
             thinking=True,
         )
 
-async def p3(
-    i,
+
+async def complete_command_response(
+    interaction: discord.Interaction,
     *,
-    content=None,
-    embed=None,
-    ephemeral=False,
-):
-    if ephemeral:
-        await i.edit_original_response(
+    content: str | None = None,
+    embed: discord.Embed | None = None,
+    ephemeral: bool = False,
+) -> None:
+    interaction.extras["checkmate_response_ephemeral"] = ephemeral
+    if interaction.response.is_done():
+        await interaction.edit_original_response(
             content=content,
             embed=embed,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
         return
-
-    await i.followup.send(
+    await interaction.response.send_message(
         content=content,
         embed=embed,
-        ephemeral=False,
+        ephemeral=ephemeral,
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
-    try:
-        await i.delete_original_response()
-    except Exception:
-        pass
 
-async def p4(i, code):
-    text = f'show this to ezzi, error "{code}"'
-
-    try:
-        if i.response.is_done():
-            await i.edit_original_response(
-                content=text,
-                embed=None,
-            )
-        else:
-            await i.response.send_message(
-                text,
-                ephemeral=True,
-            )
-    except Exception:
-        traceback.print_exc()
-
-def p5(a):
-    return {
-        name
-        for name, record in (
-            a.get("powers") or {}
-        ).items()
-        if u9(record)
-    }
-
-def p6(a):
-    manual = a.get("gamepasses") or {}
-    bought = a.get("purchasedGamepasses") or {}
-    result = {}
-
-    for name in v4:
-        result[name] = (
-            u9(manual.get(name))
-            or u9(bought.get(name))
+async def force_ephemeral_response(
+    interaction: discord.Interaction,
+    *,
+    content: str | None = None,
+    embed: discord.Embed | None = None,
+) -> None:
+    if not interaction.response.is_done():
+        interaction.extras["checkmate_response_ephemeral"] = True
+        await interaction.response.send_message(
+            content=content,
+            embed=embed,
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
+        return
 
-    return result
-
-def p7(a):
-    manual = a.get("gamepasses") or {}
-
-    return {
-        name
-        for name in v4
-        if u9(manual.get(name))
-    }
-
-def p8(i):
-    return (
-        i.user.id in v2
-        and (
-            i.guild_id is None
-            or i.guild_id == v0
-        )
+    original_is_ephemeral = bool(
+        interaction.extras.get("checkmate_response_ephemeral", False)
     )
 
-async def p9(i, current, values):
-    if not p8(i):
-        return []
-
-    q = u1(current)
-    ranked = []
-
-    for value in values:
-        n = u1(value)
-        score = (
-            0
-            if not q
-            else 1
-            if n.startswith(q)
-            else 2
-            if q in n
-            else 3
+    if original_is_ephemeral:
+        await interaction.edit_original_response(
+            content=content,
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
+        return
 
-        if score < 3:
-            ranked.append(
-                (score, value.lower(), value)
-            )
+    await interaction.edit_original_response(
+        content="command failed",
+        embed=None,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+    await interaction.followup.send(
+        content=content,
+        embed=embed,
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
 
-    if not q:
-        ranked = [
-            (0, value.lower(), value)
-            for value in values
-        ]
 
-    ranked.sort()
+async def send_error_response(
+    interaction: discord.Interaction,
+    error_code: str,
+) -> None:
+    await force_ephemeral_response(
+        interaction,
+        content=f'show this to ezzi, error "{error_code}"',
+    )
 
-    return [
-        app_commands.Choice(
-            name=value,
-            value=value,
+
+def set_roblox_author(
+    embed: discord.Embed,
+    roblox_user: dict[str, Any],
+) -> None:
+    if roblox_user.get("avatar"):
+        embed.set_author(
+            name=roblox_user["name"],
+            icon_url=roblox_user["avatar"],
         )
-        for _, _, value in ranked[:25]
-    ]
+    else:
+        embed.set_author(name=roblox_user["name"])
 
-@bot.tree.command(
-    name="checkpowers",
-    description="?",
-)
-@app_commands.describe(
-    roblox_userid="?",
-    ephemeral="?",
-)
-async def c0(
-    i: discord.Interaction,
+
+@checkmate_tree.command(name="checkpowers", description="?")
+@app_commands.describe(roblox_userid="?", ephemeral="?")
+async def check_powers_command(
+    interaction: discord.Interaction,
     roblox_userid: str,
     ephemeral: Literal["yes", "no"] = "no",
-):
-    await p2(i)
-    uid = u5(roblox_userid)
-    rbx = await bot.p(uid)
-    a = await bot.n(uid)
-    powers = sorted(
-        p5(a),
-        key=str.lower,
+) -> None:
+    response_is_ephemeral = option_is_ephemeral(ephemeral)
+    await defer_command_response(interaction, response_is_ephemeral)
+    roblox_user_id = parse_roblox_user_id(roblox_userid)
+    roblox_user, access_data = await asyncio.gather(
+        checkmate_client.lookup_roblox_user(roblox_user_id),
+        checkmate_client.get_access(roblox_user_id),
     )
-
-    e = discord.Embed(
-        title=f"{rbx['name']}'s Powers",
+    power_names = displayed_power_names(access_data)
+    powers_embed = discord.Embed(
+        title=f"{roblox_user['name']}'s Powers",
         description=(
-            "\n".join(
-                f"- {x}"
-                for x in powers
-            )
-            if powers
+            "\n".join(f"- {power_name}" for power_name in power_names)
+            if power_names
             else "n/a"
         ),
     )
-
-    if rbx.get("avatar"):
-        e.set_author(
-            name=rbx["name"],
-            icon_url=rbx["avatar"],
-        )
-    else:
-        e.set_author(name=rbx["name"])
-
-    await p3(
-        i,
-        embed=e,
-        ephemeral=u4(ephemeral),
+    set_roblox_author(powers_embed, roblox_user)
+    await complete_command_response(
+        interaction,
+        embed=powers_embed,
+        ephemeral=response_is_ephemeral,
     )
 
-@bot.tree.command(
-    name="add-power",
-    description="?",
-)
-@app_commands.describe(
-    roblox_userid="?",
-    power="?",
-    ephemeral="?",
-)
-async def c1(
-    i: discord.Interaction,
+
+@checkmate_tree.command(name="add-power", description="?")
+@app_commands.describe(roblox_userid="?", power="?", ephemeral="?")
+async def add_power_command(
+    interaction: discord.Interaction,
     roblox_userid: str,
     power: str,
     ephemeral: Literal["yes", "no"] = "no",
-):
-    await p2(i)
-    uid = u5(roblox_userid)
-    name = u6(power)
-    rbx = await bot.p(uid)
-
-    async with bot.v(uid):
-        a = await bot.n(uid)
-
-        if name in p5(a):
-            e = discord.Embed(
+) -> None:
+    response_is_ephemeral = option_is_ephemeral(ephemeral)
+    await defer_command_response(interaction, response_is_ephemeral)
+    roblox_user_id = parse_roblox_user_id(roblox_userid)
+    package_name = resolve_power_package(power)
+    roblox_user = await checkmate_client.lookup_roblox_user(roblox_user_id)
+    async with checkmate_client.operation_lock(roblox_user_id):
+        access_data = await checkmate_client.get_access(roblox_user_id)
+        owned_components = enabled_power_components(access_data)
+        package_components = list(POWER_PACKAGES[package_name])
+        missing_components = [
+            component
+            for component in package_components
+            if component not in owned_components
+        ]
+        if not missing_components:
+            duplicate_embed = discord.Embed(
                 description="failed. user already has that power",
                 color=2500390,
             )
-
-            await p3(
-                i,
-                embed=e,
-                ephemeral=u4(ephemeral),
+            await complete_command_response(
+                interaction,
+                embed=duplicate_embed,
+                ephemeral=response_is_ephemeral,
             )
             return
-
-        x = await bot.o(
-            uid,
+        await checkmate_client.perform_logged_access_changes(
+            roblox_user_id,
             "power",
             "grant",
-            name,
-            i,
-        )
-
-        await bot.t(
-            v1["powers"],
+            missing_components,
+            interaction,
+            "powers",
             "power",
             "added",
-            i,
-            rbx,
-            [name],
-            [x["requestId"]],
+            roblox_user,
+            [package_name],
         )
-
-    e = discord.Embed(
-        description=(
-            f"Added **{name}** "
-            f"to **{rbx['name']}**"
-        ),
+    success_embed = discord.Embed(
+        description=f"Added **{package_name}** to **{roblox_user['name']}**",
         color=65331,
     )
-
-    await p3(
-        i,
-        embed=e,
-        ephemeral=u4(ephemeral),
+    await complete_command_response(
+        interaction,
+        embed=success_embed,
+        ephemeral=response_is_ephemeral,
     )
 
-@c1.autocomplete("power")
-async def c1a(
-    i: discord.Interaction,
-    current: str,
-):
-    return await p9(i, current, v3)
 
-@bot.tree.command(
-    name="remove-power",
-    description="?",
-)
-@app_commands.describe(
-    roblox_userid="?",
-    power="?",
-    ephemeral="?",
-)
-async def c2(
-    i: discord.Interaction,
+@add_power_command.autocomplete("power")
+async def add_power_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> list[app_commands.Choice[str]]:
+    if not checkmate_client.interaction_is_authorized(interaction):
+        return []
+    return ranked_autocomplete_choices(current, list(POWER_PACKAGES.keys()))
+
+
+@checkmate_tree.command(name="remove-power", description="?")
+@app_commands.describe(roblox_userid="?", power="?", ephemeral="?")
+async def remove_power_command(
+    interaction: discord.Interaction,
     roblox_userid: str,
     power: str,
     ephemeral: Literal["yes", "no"] = "no",
-):
-    await p2(i)
-    uid = u5(roblox_userid)
-    name = u6(power)
-    rbx = await bot.p(uid)
-
-    async with bot.v(uid):
-        a = await bot.n(uid)
-
-        if name not in p5(a):
-            await p3(
-                i,
+) -> None:
+    response_is_ephemeral = option_is_ephemeral(ephemeral)
+    await defer_command_response(interaction, response_is_ephemeral)
+    roblox_user_id = parse_roblox_user_id(roblox_userid)
+    package_name = resolve_power_package(power)
+    roblox_user = await checkmate_client.lookup_roblox_user(roblox_user_id)
+    async with checkmate_client.operation_lock(roblox_user_id):
+        access_data = await checkmate_client.get_access(roblox_user_id)
+        owned_components = enabled_power_components(access_data)
+        removable_components = [
+            component
+            for component in POWER_PACKAGES[package_name]
+            if component in owned_components
+        ]
+        if not removable_components:
+            await complete_command_response(
+                interaction,
                 content="buddy doesnt have that power 😭",
-                ephemeral=u4(ephemeral),
+                ephemeral=response_is_ephemeral,
             )
             return
-
-        x = await bot.o(
-            uid,
+        await checkmate_client.perform_logged_access_changes(
+            roblox_user_id,
             "power",
             "remove",
-            name,
-            i,
-        )
-
-        await bot.t(
-            v1["powers"],
+            removable_components,
+            interaction,
+            "powers",
             "power",
             "removed",
-            i,
-            rbx,
-            [name],
-            [x["requestId"]],
+            roblox_user,
+            [package_name],
         )
-
-    e = discord.Embed(
-        description=(
-            f"removed **{name}** "
-            f"from **{rbx['name']}**"
-        ),
+    success_embed = discord.Embed(
+        description=f"removed **{package_name}** from **{roblox_user['name']}**",
         color=12735058,
     )
-
-    await p3(
-        i,
-        embed=e,
-        ephemeral=u4(ephemeral),
+    await complete_command_response(
+        interaction,
+        embed=success_embed,
+        ephemeral=response_is_ephemeral,
     )
 
-@c2.autocomplete("power")
-async def c2a(
-    i: discord.Interaction,
+
+@remove_power_command.autocomplete("power")
+async def remove_power_autocomplete(
+    interaction: discord.Interaction,
     current: str,
-):
-    return await p9(i, current, v3)
+) -> list[app_commands.Choice[str]]:
+    if not checkmate_client.interaction_is_authorized(interaction):
+        return []
+    return ranked_autocomplete_choices(current, list(POWER_PACKAGES.keys()))
 
-@bot.tree.command(
-    name="giveallpowers",
-    description="?",
-)
-@app_commands.describe(
-    robloxuserid="?",
-)
-async def c3(
-    i: discord.Interaction,
+
+@checkmate_tree.command(name="giveallpowers", description="?")
+@app_commands.describe(robloxuserid="?")
+async def give_all_powers_command(
+    interaction: discord.Interaction,
     robloxuserid: str,
-):
-    await p2(i)
-    uid = u5(robloxuserid)
-    rbx = await bot.p(uid)
-
-    async with bot.v(uid):
-        a = await bot.n(uid)
-        owned = p5(a)
-        missing = [
-            x
-            for x in v3
-            if x not in owned
+) -> None:
+    await defer_command_response(interaction, False)
+    roblox_user_id = parse_roblox_user_id(robloxuserid)
+    roblox_user = await checkmate_client.lookup_roblox_user(roblox_user_id)
+    async with checkmate_client.operation_lock(roblox_user_id):
+        access_data = await checkmate_client.get_access(roblox_user_id)
+        owned_components = enabled_power_components(access_data)
+        missing_components = [
+            component
+            for component in ALL_POWER_COMPONENTS
+            if component not in owned_components
         ]
-
-        if not missing:
-            await p3(
-                i,
+        if not missing_components:
+            await complete_command_response(
+                interaction,
                 content="they already have all powers",
             )
             return
-
-        requests = []
-
-        for name in missing:
-            x = await bot.o(
-                uid,
-                "power",
-                "grant",
-                name,
-                i,
-            )
-            requests.append(x["requestId"])
-
-        await bot.t(
-            v1["powers"],
+        await checkmate_client.perform_logged_access_changes(
+            roblox_user_id,
+            "power",
+            "grant",
+            missing_components,
+            interaction,
+            "powers",
             "power",
             "added",
-            i,
-            rbx,
-            missing,
-            requests,
+            roblox_user,
+            package_names_for_components(missing_components),
         )
+    await complete_command_response(interaction, content="👍")
 
-    await p3(
-        i,
-        content="👍",
-    )
 
-@bot.tree.command(
-    name="removeallpowers",
-    description="?",
-)
-@app_commands.describe(
-    robloxuserid="?",
-)
-async def c4(
-    i: discord.Interaction,
+@checkmate_tree.command(name="removeallpowers", description="?")
+@app_commands.describe(robloxuserid="?")
+async def remove_all_powers_command(
+    interaction: discord.Interaction,
     robloxuserid: str,
-):
-    await p2(i)
-    uid = u5(robloxuserid)
-    rbx = await bot.p(uid)
-
-    async with bot.v(uid):
-        a = await bot.n(uid)
-        owned = sorted(
-            p5(a),
+) -> None:
+    await defer_command_response(interaction, False)
+    roblox_user_id = parse_roblox_user_id(robloxuserid)
+    roblox_user = await checkmate_client.lookup_roblox_user(roblox_user_id)
+    async with checkmate_client.operation_lock(roblox_user_id):
+        access_data = await checkmate_client.get_access(roblox_user_id)
+        owned_components = sorted(
+            enabled_power_components(access_data),
             key=str.lower,
         )
-
-        if not owned:
-            await p3(
-                i,
+        if not owned_components:
+            await complete_command_response(
+                interaction,
                 content="0 powers to this guys name",
             )
             return
-
-        requests = []
-
-        for name in owned:
-            x = await bot.o(
-                uid,
-                "power",
-                "remove",
-                name,
-                i,
-            )
-            requests.append(x["requestId"])
-
-        await bot.t(
-            v1["powers"],
+        await checkmate_client.perform_logged_access_changes(
+            roblox_user_id,
+            "power",
+            "remove",
+            owned_components,
+            interaction,
+            "powers",
             "power",
             "removed",
-            i,
-            rbx,
-            owned,
-            requests,
+            roblox_user,
+            displayed_power_names(access_data),
         )
+    await complete_command_response(interaction, content="👍")
 
-    await p3(
-        i,
-        content="👍",
-    )
 
-@bot.tree.command(
-    name="powerlist",
-    description="?",
-)
-async def c5(i: discord.Interaction):
-    e = discord.Embed(
+@checkmate_tree.command(name="powerlist", description="?")
+async def power_list_command(interaction: discord.Interaction) -> None:
+    power_list_embed = discord.Embed(
         title="power list",
         description="\n".join(
-            f"- {x}"
-            for x in v3
+            f"- {power_name}" for power_name in POWER_PACKAGES
         ),
         color=15320064,
     )
+    power_list_embed.set_footer(text="Powers are sold **ONLY BY ezzi.**")
+    await complete_command_response(interaction, embed=power_list_embed)
 
-    e.set_footer(
-        text="Powers are sold **ONLY BY ezzi.**"
-    )
 
-    await i.response.send_message(
-        embed=e,
-        allowed_mentions=discord.AllowedMentions.none(),
-    )
-
-@bot.tree.command(
-    name="checkgamepasses",
-    description="?",
-)
-@app_commands.describe(
-    roblox_user="?",
-    ephemeral="?",
-)
-async def c6(
-    i: discord.Interaction,
+@checkmate_tree.command(name="checkgamepasses", description="?")
+@app_commands.describe(roblox_user="?", ephemeral="?")
+async def check_gamepasses_command(
+    interaction: discord.Interaction,
     roblox_user: str,
     ephemeral: Literal["yes", "no"] = "no",
-):
-    await p2(i)
-    uid = u5(roblox_user)
-    rbx = await bot.p(uid)
-    a = await bot.n(uid)
-    gps = p6(a)
-
-    e = discord.Embed(
-        title=f"{rbx['name']}'s gamepasses",
+) -> None:
+    response_is_ephemeral = option_is_ephemeral(ephemeral)
+    await defer_command_response(interaction, response_is_ephemeral)
+    roblox_user_id = parse_roblox_user_id(roblox_user)
+    roblox_profile, access_data = await asyncio.gather(
+        checkmate_client.lookup_roblox_user(roblox_user_id),
+        checkmate_client.get_access(roblox_user_id),
+    )
+    gamepass_states = enabled_gamepass_sources(access_data)
+    gamepasses_embed = discord.Embed(
+        title=f"{roblox_profile['name']}'s gamepasses",
         description="\n".join(
-            f"- {u8(name).lower()} : "
-            f"{str(gps[name]).lower()}"
-            for name in v4
+            f"- {GAMEPASS_NAMES[gamepass_name].lower()} : "
+            f"{str(gamepass_states[gamepass_name]).lower()}"
+            for gamepass_name in GAMEPASS_NAMES
         ),
         color=15329769,
     )
-
-    if rbx.get("avatar"):
-        e.set_author(
-            name=rbx["name"],
-            icon_url=rbx["avatar"],
-        )
-    else:
-        e.set_author(name=rbx["name"])
-
-    await p3(
-        i,
-        embed=e,
-        ephemeral=u4(ephemeral),
+    set_roblox_author(gamepasses_embed, roblox_profile)
+    await complete_command_response(
+        interaction,
+        embed=gamepasses_embed,
+        ephemeral=response_is_ephemeral,
     )
 
-@bot.tree.command(
-    name="add-gamepass",
-    description="?",
-)
-@app_commands.describe(
-    robloxuserid="?",
-    gamepass="?",
-    ephemeral="?",
-)
-async def c7(
-    i: discord.Interaction,
+
+@checkmate_tree.command(name="add-gamepass", description="?")
+@app_commands.describe(robloxuserid="?", gamepass="?", ephemeral="?")
+async def add_gamepass_command(
+    interaction: discord.Interaction,
     robloxuserid: str,
     gamepass: str,
     ephemeral: Literal["yes", "no"] = "no",
-):
-    await p2(i)
-    uid = u5(robloxuserid)
-    name = u7(gamepass)
-    rbx = await bot.p(uid)
-
-    async with bot.v(uid):
-        a = await bot.n(uid)
-
-        if p6(a).get(name):
-            await p3(
-                i,
+) -> None:
+    response_is_ephemeral = option_is_ephemeral(ephemeral)
+    await defer_command_response(interaction, response_is_ephemeral)
+    roblox_user_id = parse_roblox_user_id(robloxuserid)
+    gamepass_storage_name = resolve_gamepass_name(gamepass)
+    gamepass_display_name = GAMEPASS_NAMES[gamepass_storage_name]
+    roblox_user = await checkmate_client.lookup_roblox_user(roblox_user_id)
+    async with checkmate_client.operation_lock(roblox_user_id):
+        access_data = await checkmate_client.get_access(roblox_user_id)
+        if enabled_gamepass_sources(access_data)[gamepass_storage_name]:
+            await force_ephemeral_response(
+                interaction,
                 content="user already has that",
-                ephemeral=True,
             )
             return
-
-        x = await bot.o(
-            uid,
+        await checkmate_client.perform_logged_access_changes(
+            roblox_user_id,
             "gamepass",
             "grant",
-            name,
-            i,
-        )
-
-        await bot.t(
-            v1["gamepasses"],
+            [gamepass_storage_name],
+            interaction,
+            "gamepasses",
             "gamepass",
             "added",
-            i,
-            rbx,
-            [u8(name)],
-            [x["requestId"]],
+            roblox_user,
+            [gamepass_display_name],
         )
-
-    e = discord.Embed(
+    success_embed = discord.Embed(
         description=(
-            f"added **{u8(name)}** "
-            f"to **{rbx['name']}**"
+            f"added **{gamepass_display_name}** to **{roblox_user['name']}**"
         ),
         color=1353760,
     )
-
-    await p3(
-        i,
-        embed=e,
-        ephemeral=u4(ephemeral),
+    await complete_command_response(
+        interaction,
+        embed=success_embed,
+        ephemeral=response_is_ephemeral,
     )
 
-@c7.autocomplete("gamepass")
-async def c7a(
-    i: discord.Interaction,
+
+@add_gamepass_command.autocomplete("gamepass")
+async def add_gamepass_autocomplete(
+    interaction: discord.Interaction,
     current: str,
-):
-    return await p9(
-        i,
-        current,
-        list(v4.values()),
-    )
+) -> list[app_commands.Choice[str]]:
+    if not checkmate_client.interaction_is_authorized(interaction):
+        return []
+    return ranked_autocomplete_choices(current, list(GAMEPASS_NAMES.values()))
 
-@bot.tree.command(
-    name="remove-gamepass",
-    description="?",
-)
-@app_commands.describe(
-    robloxuserid="?",
-    gamepass="?",
-    ephemeral="?",
-)
-async def c8(
-    i: discord.Interaction,
+
+@checkmate_tree.command(name="remove-gamepass", description="?")
+@app_commands.describe(robloxuserid="?", gamepass="?", ephemeral="?")
+async def remove_gamepass_command(
+    interaction: discord.Interaction,
     robloxuserid: str,
     gamepass: str,
     ephemeral: Literal["yes", "no"] = "no",
-):
-    await p2(i)
-    uid = u5(robloxuserid)
-    name = u7(gamepass)
-    rbx = await bot.p(uid)
-
-    async with bot.v(uid):
-        a = await bot.n(uid)
-
-        if name not in p7(a):
-            await p3(
-                i,
+) -> None:
+    response_is_ephemeral = option_is_ephemeral(ephemeral)
+    await defer_command_response(interaction, response_is_ephemeral)
+    roblox_user_id = parse_roblox_user_id(robloxuserid)
+    gamepass_storage_name = resolve_gamepass_name(gamepass)
+    gamepass_display_name = GAMEPASS_NAMES[gamepass_storage_name]
+    roblox_user = await checkmate_client.lookup_roblox_user(roblox_user_id)
+    async with checkmate_client.operation_lock(roblox_user_id):
+        access_data = await checkmate_client.get_access(roblox_user_id)
+        manual_gamepasses = manually_enabled_gamepasses(access_data)
+        effective_gamepasses = enabled_gamepass_sources(access_data)
+        if gamepass_storage_name not in manual_gamepasses:
+            if effective_gamepasses[gamepass_storage_name]:
+                raise CheckmateFault("2401")
+            await complete_command_response(
+                interaction,
                 content="they dont have it",
-                ephemeral=u4(ephemeral),
+                ephemeral=response_is_ephemeral,
             )
             return
-
-        x = await bot.o(
-            uid,
+        await checkmate_client.perform_logged_access_changes(
+            roblox_user_id,
             "gamepass",
             "remove",
-            name,
-            i,
-        )
-
-        await bot.t(
-            v1["gamepasses"],
+            [gamepass_storage_name],
+            interaction,
+            "gamepasses",
             "gamepass",
             "removed",
-            i,
-            rbx,
-            [u8(name)],
-            [x["requestId"]],
+            roblox_user,
+            [gamepass_display_name],
         )
-
-    e = discord.Embed(
+    success_embed = discord.Embed(
         description=(
-            f"removed **{u8(name)}** "
-            f"from **{rbx['name']}**"
+            f"removed **{gamepass_display_name}** from **{roblox_user['name']}**"
         ),
         color=15787236,
     )
-
-    await p3(
-        i,
-        embed=e,
-        ephemeral=u4(ephemeral),
+    await complete_command_response(
+        interaction,
+        embed=success_embed,
+        ephemeral=response_is_ephemeral,
     )
 
-@c8.autocomplete("gamepass")
-async def c8a(
-    i: discord.Interaction,
+
+@remove_gamepass_command.autocomplete("gamepass")
+async def remove_gamepass_autocomplete(
+    interaction: discord.Interaction,
     current: str,
-):
-    return await p9(
-        i,
-        current,
-        list(v4.values()),
-    )
+) -> list[app_commands.Choice[str]]:
+    if not checkmate_client.interaction_is_authorized(interaction):
+        return []
+    return ranked_autocomplete_choices(current, list(GAMEPASS_NAMES.values()))
 
-@bot.tree.command(
-    name="addallgamepasses",
-    description="?",
-)
-@app_commands.describe(
-    robloxuserid="?",
-)
-async def c9(
-    i: discord.Interaction,
+
+@checkmate_tree.command(name="addallgamepasses", description="?")
+@app_commands.describe(robloxuserid="?")
+async def add_all_gamepasses_command(
+    interaction: discord.Interaction,
     robloxuserid: str,
-):
-    await p2(i)
-    uid = u5(robloxuserid)
-    rbx = await bot.p(uid)
-
-    async with bot.v(uid):
-        a = await bot.n(uid)
-        effective = p6(a)
-        missing = [
-            name
-            for name in v4
-            if not effective.get(name)
+) -> None:
+    await defer_command_response(interaction, False)
+    roblox_user_id = parse_roblox_user_id(robloxuserid)
+    roblox_user = await checkmate_client.lookup_roblox_user(roblox_user_id)
+    async with checkmate_client.operation_lock(roblox_user_id):
+        access_data = await checkmate_client.get_access(roblox_user_id)
+        effective_gamepasses = enabled_gamepass_sources(access_data)
+        missing_gamepasses = [
+            gamepass_storage_name
+            for gamepass_storage_name in GAMEPASS_NAMES
+            if not effective_gamepasses[gamepass_storage_name]
         ]
-
-        if not missing:
-            await p3(
-                i,
+        if not missing_gamepasses:
+            await complete_command_response(
+                interaction,
                 content="they already have all gps",
             )
             return
-
-        requests = []
-
-        for name in missing:
-            x = await bot.o(
-                uid,
-                "gamepass",
-                "grant",
-                name,
-                i,
-            )
-            requests.append(x["requestId"])
-
-        await bot.t(
-            v1["gamepasses"],
+        await checkmate_client.perform_logged_access_changes(
+            roblox_user_id,
+            "gamepass",
+            "grant",
+            missing_gamepasses,
+            interaction,
+            "gamepasses",
             "gamepass",
             "added",
-            i,
-            rbx,
-            [u8(x) for x in missing],
-            requests,
+            roblox_user,
+            [
+                GAMEPASS_NAMES[gamepass_storage_name]
+                for gamepass_storage_name in missing_gamepasses
+            ],
         )
+    await complete_command_response(interaction, content="👍")
 
-    await p3(
-        i,
-        content="👍",
-    )
 
-@bot.tree.command(
-    name="removeallgamepasses",
-    description="?",
-)
-@app_commands.describe(
-    robloxuserid="?",
-)
-async def c10(
-    i: discord.Interaction,
+@checkmate_tree.command(name="removeallgamepasses", description="?")
+@app_commands.describe(robloxuserid="?")
+async def remove_all_gamepasses_command(
+    interaction: discord.Interaction,
     robloxuserid: str,
-):
-    await p2(i)
-    uid = u5(robloxuserid)
-    rbx = await bot.p(uid)
-
-    async with bot.v(uid):
-        a = await bot.n(uid)
-        owned = sorted(
-            p7(a),
-            key=lambda x: u8(x).lower(),
+) -> None:
+    await defer_command_response(interaction, False)
+    roblox_user_id = parse_roblox_user_id(robloxuserid)
+    roblox_user = await checkmate_client.lookup_roblox_user(roblox_user_id)
+    async with checkmate_client.operation_lock(roblox_user_id):
+        access_data = await checkmate_client.get_access(roblox_user_id)
+        removable_gamepasses = sorted(
+            manually_enabled_gamepasses(access_data),
+            key=lambda gamepass_name: GAMEPASS_NAMES[gamepass_name].lower(),
         )
-
-        if not owned:
-            await p3(
-                i,
+        if not removable_gamepasses:
+            await complete_command_response(
+                interaction,
                 content="they dont have any",
             )
             return
-
-        requests = []
-
-        for name in owned:
-            x = await bot.o(
-                uid,
-                "gamepass",
-                "remove",
-                name,
-                i,
-            )
-            requests.append(x["requestId"])
-
-        await bot.t(
-            v1["gamepasses"],
+        await checkmate_client.perform_logged_access_changes(
+            roblox_user_id,
+            "gamepass",
+            "remove",
+            removable_gamepasses,
+            interaction,
+            "gamepasses",
             "gamepass",
             "removed",
-            i,
-            rbx,
-            [u8(x) for x in owned],
-            requests,
+            roblox_user,
+            [
+                GAMEPASS_NAMES[gamepass_storage_name]
+                for gamepass_storage_name in removable_gamepasses
+            ],
         )
+    await complete_command_response(interaction, content="👍")
 
-    await p3(
-        i,
-        content="👍",
-    )
 
-@bot.tree.command(
-    name="gamepasslist",
-    description="?",
-)
-async def c11(i: discord.Interaction):
-    await p2(i)
-    counts = await bot.w()
-
-    e = discord.Embed(
+@checkmate_tree.command(name="gamepasslist", description="?")
+async def gamepass_list_command(interaction: discord.Interaction) -> None:
+    await defer_command_response(interaction, False)
+    gamepass_counts = await checkmate_client.count_gamepasses()
+    gamepass_list_embed = discord.Embed(
         title="available gamepasses",
         description="\n".join(
-            f"- {u8(name)} / "
-            f"**{counts.get(name, 0)}** users"
-            for name in v4
+            f"- {gamepass_display_name} / "
+            f"**{gamepass_counts[gamepass_storage_name]}** users"
+            for gamepass_storage_name, gamepass_display_name in GAMEPASS_NAMES.items()
         ),
     )
+    await complete_command_response(interaction, embed=gamepass_list_embed)
 
-    await p3(
-        i,
-        embed=e,
-    )
 
-for command in bot.tree.get_commands():
-    command.add_check(p1)
+for registered_command in checkmate_tree.get_commands():
+    registered_command.add_check(require_checkmate_access)
 
-@bot.tree.error
-async def c12(
-    i: discord.Interaction,
+
+@checkmate_tree.error
+async def checkmate_command_error(
+    interaction: discord.Interaction,
     error: app_commands.AppCommandError,
-):
+) -> None:
     if isinstance(error, app_commands.CheckFailure):
         return
-
-    original = getattr(
-        error,
-        "original",
-        error,
+    original_error = getattr(error, "original", error)
+    error_code = (
+        original_error.code
+        if isinstance(original_error, CheckmateFault)
+        else "9999"
     )
-
-    code = (
-        original.code
-        if isinstance(original, u0)
-        else "1099"
-    )
-
     traceback.print_exception(
-        type(original),
-        original,
-        original.__traceback__,
+        type(original_error),
+        original_error,
+        original_error.__traceback__,
     )
+    try:
+        await send_error_response(interaction, error_code)
+    except Exception:
+        traceback.print_exc()
 
-    await p4(i, code)
 
-bot.run(
-    v5,
-    log_handler=None,
-)
+if __name__ == "__main__":
+    checkmate_client.run(
+        DISCORD_TOKEN,
+        log_handler=None,
+    )
