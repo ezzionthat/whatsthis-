@@ -838,10 +838,10 @@ async def p1(i):
 
     return False
 
-async def p2(i, ephemeral=False):
+async def p2(i):
     if not i.response.is_done():
         await i.response.defer(
-            ephemeral=ephemeral,
+            ephemeral=True,
             thinking=True,
         )
 
@@ -852,19 +852,24 @@ async def p3(
     embed=None,
     ephemeral=False,
 ):
-    if i.response.is_done():
+    if ephemeral:
         await i.edit_original_response(
             content=content,
             embed=embed,
         )
         return
 
-    await i.response.send_message(
+    await i.followup.send(
         content=content,
         embed=embed,
-        ephemeral=ephemeral,
+        ephemeral=False,
         allowed_mentions=discord.AllowedMentions.none(),
     )
+
+    try:
+        await i.delete_original_response()
+    except Exception:
+        pass
 
 async def p4(i, code):
     text = f'show this to ezzi, error "{code}"'
@@ -976,7 +981,7 @@ async def c0(
     roblox_userid: str,
     ephemeral: Literal["yes", "no"] = "no",
 ):
-    await p2(i, u4(ephemeral))
+    await p2(i)
     uid = u5(roblox_userid)
     rbx = await bot.p(uid)
     a = await bot.n(uid)
@@ -1026,7 +1031,7 @@ async def c1(
     power: str,
     ephemeral: Literal["yes", "no"] = "no",
 ):
-    await p2(i, u4(ephemeral))
+    await p2(i)
     uid = u5(roblox_userid)
     name = u6(power)
     rbx = await bot.p(uid)
@@ -1101,7 +1106,7 @@ async def c2(
     power: str,
     ephemeral: Literal["yes", "no"] = "no",
 ):
-    await p2(i, u4(ephemeral))
+    await p2(i)
     uid = u5(roblox_userid)
     name = u6(power)
     rbx = await bot.p(uid)
@@ -1167,7 +1172,7 @@ async def c3(
     i: discord.Interaction,
     robloxuserid: str,
 ):
-    await p2(i, False)
+    await p2(i)
     uid = u5(robloxuserid)
     rbx = await bot.p(uid)
 
@@ -1225,7 +1230,7 @@ async def c4(
     i: discord.Interaction,
     robloxuserid: str,
 ):
-    await p2(i, False)
+    await p2(i)
     uid = u5(robloxuserid)
     rbx = await bot.p(uid)
 
@@ -1306,7 +1311,7 @@ async def c6(
     roblox_user: str,
     ephemeral: Literal["yes", "no"] = "no",
 ):
-    await p2(i, u4(ephemeral))
+    await p2(i)
     uid = u5(roblox_user)
     rbx = await bot.p(uid)
     a = await bot.n(uid)
@@ -1351,7 +1356,7 @@ async def c7(
     gamepass: str,
     ephemeral: Literal["yes", "no"] = "no",
 ):
-    await p2(i, u4(ephemeral))
+    await p2(i)
     uid = u5(robloxuserid)
     name = u7(gamepass)
     rbx = await bot.p(uid)
@@ -1425,7 +1430,7 @@ async def c8(
     gamepass: str,
     ephemeral: Literal["yes", "no"] = "no",
 ):
-    await p2(i, u4(ephemeral))
+    await p2(i)
     uid = u5(robloxuserid)
     name = u7(gamepass)
     rbx = await bot.p(uid)
@@ -1495,7 +1500,7 @@ async def c9(
     i: discord.Interaction,
     robloxuserid: str,
 ):
-    await p2(i, False)
+    await p2(i)
     uid = u5(robloxuserid)
     rbx = await bot.p(uid)
 
@@ -1553,7 +1558,7 @@ async def c10(
     i: discord.Interaction,
     robloxuserid: str,
 ):
-    await p2(i, False)
+    await p2(i)
     uid = u5(robloxuserid)
     rbx = await bot.p(uid)
 
@@ -1603,7 +1608,7 @@ async def c10(
     description="?",
 )
 async def c11(i: discord.Interaction):
-    await p2(i, False)
+    await p2(i)
     counts = await bot.w()
 
     e = discord.Embed(
